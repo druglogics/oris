@@ -14,4 +14,7 @@ rank = comm.Get_rank()
 size = comm.Get_size()
 
 zip_path = sys.argv[1]
-SampleModels(zip_path, sample_size=10, th=300)
+sample_size = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+th = int(sys.argv[3]) if len(sys.argv) > 3 else 300
+
+SampleModels(zip_path, sample_size=sample_size, th=th)
