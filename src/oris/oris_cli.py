@@ -406,7 +406,7 @@ def main(argv: list[str] | None = None) -> None:
             zip_dir="{zips_dir}"
             for z in "$zip_dir"/*.zip; do
                 echo ">>> [SAMPLING] Starting radical sampling for: $z"
-                mpirun python3 -m oris.do_sampling "$z"
+                mpirun python3 -m oris.do_sampling "$z" "$sampling" "$timeout_sampling"
                 echo ">>> [SAMPLING] Finished radical sampling for: $z"
             done
             """
