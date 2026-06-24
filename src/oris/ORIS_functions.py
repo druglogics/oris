@@ -257,6 +257,14 @@ def SampleModels(zip_path, sample_size=10, th=120, master_timeout=125):
 
         # Write whatever we got (even if < target_size)
         sampled_models = [model_files[i] for i in sampled_idxs]
+
+        # Stop if no sampled models were retrieved
+        if len(sampled_models) == 0:
+            print(f"\n[MASTER][ERROR] No models passed sampling for {zfile}. Aborting job.")
+            sys.stdout.flush()
+            shutil.rmtree(tempdir, ignore_errors = True)
+            MPI.COMM_WORLD.Abort(1)
+            
         base = os.path.splitext(zfile)[0]
         txt_name = f"SampledModels_{base}.txt"
         local_txt = os.path.join(tempdir, txt_name)
