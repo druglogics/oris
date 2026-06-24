@@ -152,7 +152,6 @@ def InitialConditions(zips):
 
 ##################################################################################
 
-
 def SampleModels(zip_path, sample_size=10, th=120, master_timeout=125):
 
     # === Paths ===
@@ -298,6 +297,17 @@ def SampleModels(zip_path, sample_size=10, th=120, master_timeout=125):
         def run_countpaths(mpath, mo, q):
             try:
                 model = blv.Load(mpath)
+                dnf = model.Info["DNF"].astype(str).str.strip()
+                bad_rules = model.Info.index[dnf.isin(["1", "0"])].tolist()
+                if bad_rules:
+                    print(
+                        f"[WORKER] Skipping {os.path.basename(mpath)}: "
+                        f"tautology/contradiction detected in {bad_rules}",
+                        flush = True
+                    )
+                    q.put((0.0, False))
+                    return
+                    
                 subset = model.Info[
                     model.Info.index.str.endswith(
                         ("_ACT", "_INH", "_MEDIA", "_iCOND", "_event")
@@ -528,6 +538,20 @@ def PathsOris_HPC(zips, limit = None):
             with open(modelpath, "w") as f:
                 f.writelines(lines)
             bmodel = blv.Load(modelpath)
+            dnf = bmodel.Info["DNF"].astype(str).str.strip()
+            bad_rules = bmodel.Info.index[dnf.isin(["1", "0"])].tolist()
+            if bad_rules:
+                print(
+                    f"[WORKER] Skipping {modelname}: "
+                    f"tautology/contradiction detected in {bad_rules}",
+                    flush = True
+                )
+                result_lines = ""
+                for ss in range(len(bmodel.Info.columns) - 2):
+                    line = "\t".join(str(x) for x in ([modelname.replace(".bnet", "")] + [ss] + ["NA"] * len(mo) + ["NA"] * len(mo)))
+                    result_lines += line + "\n"
+                comm.send(result_lines, dest = 0, tag = 12)
+                continue
             subset = bmodel.Info[bmodel.Info.index.str.endswith(("_ACT", "_INH", "_MEDIA", "_iCOND", "_event"))]
             constraints_on = subset.columns[subset.ne(0).all(axis = 0)]
             bmodel.Info = bmodel.Info[constraints_on]
@@ -792,6 +816,17 @@ def PathwaysOris(zips, perturbations = "all"):
                 with open(modelpath, "w") as f:
                     f.writelines(lines)
                 bmodel = blv.Load(modelpath)
+                dnf = bmodel.Info["DNF"].astype(str).str.strip()
+                bad_rules = bmodel.Info.index[dnf.isin(["1", "0"])].tolist()
+                if bad_rules:
+                    print(
+                        f"[WORKER] Skipping {modelname}: "
+                        f"tautology/contradiction detected in {bad_rules}",
+                        flush = True
+                    )
+                    paths = pd.DataFrame({"Node": nodes_in_pathways, f"{modelname.replace('.bnet', '')}": ["NA"] * len(nodes_in_pathways)})
+                    comm.send(paths, dest = 0, tag = 12)
+                    continue
                 if len(set(nodes_in_pathways) - set(bmodel.Nodes)) > 0:
                     warnings.warn(
                         f"{set(nodes_in_pathways) - set(bmodel.Nodes)} not in {modelname} model!"
@@ -866,6 +901,29 @@ def PathsOrisFull_HPC(zips, limit = None):
             with open(modelpath, "w") as f:
                 f.writelines(lines)
             bmodel = blv.Load(modelpath)
+            dnf = bmodel.Info["DNF"].astype(str).str.strip()
+            bad_rules = bmodel.Info.index[dnf.isin(["1", "0"])].tolist()
+            if bad_rules:
+                print(
+                    f"[WORKER] Skipping {modelname}: "
+                    f"tautology/contradiction detected in {bad_rules}",
+                    flush=True
+                )
+            
+                result_lines = ""
+                for ss in range(len(bmodel.Info.columns) - 2):
+                    line = "\t".join(
+                        str(x) for x in (
+                            [f"{os.path.splitext(zfile)[0]}_{modelname.replace('.bnet', '').replace('PertModels/', '')}"]
+                            + [ss]
+                            + ["NA"] * len(node_names)
+                            + ["NA"] * len(node_names)
+                        )
+                    )
+                    result_lines += line + "\n"
+            
+                comm.send(result_lines, dest=0, tag=12)
+                continue
             subset = bmodel.Info[bmodel.Info.index.str.endswith(("_ACT", "_INH", "_MEDIA", "_iCOND", "_event"))]
             constraints_on = subset.columns[subset.ne(0).all(axis = 0)]
             bmodel.Info = bmodel.Info[constraints_on]
