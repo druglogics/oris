@@ -14,11 +14,11 @@ rank = comm.Get_rank()
 size = comm.Get_size()
 
 zips   = sys.argv[1]
-targets = ["EGFR", "IGF1R", "MET"]
+targets = sys.argv[2].split(",") if len(sys.argv) > 2 and sys.argv[2] else []
 
-AddMedia(zips, targets)
-
-comm.Barrier()
+if targets:
+  AddMedia(zips, targets)
+  comm.Barrier()
 
 InitialConditions(zips)
 
