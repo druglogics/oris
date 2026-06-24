@@ -280,6 +280,7 @@ def main(argv: list[str] | None = None) -> None:
         timeout_paths = oris_cfg.get("timeout_paths", None)
 
     media_targets = oris_cfg.get("media_targets", [])
+    media_targets_arg = ",".join(media_targets)
 
     # 3) Detect if running inside a Slurm job
     in_slurm = "SLURM_JOB_ID" in os.environ
@@ -378,11 +379,11 @@ def main(argv: list[str] | None = None) -> None:
             f"""\
             zip_dir="{zips_dir}"
             echo ">>> [INITIAL] Starting AddMedia + InitialConditions on $zip_dir"
-            mpirun python3 -m oris.initial_conditions "$zip_dir"
+            echo ">>> [INITIAL] Media targets: {media_targets_arg}"
+            mpirun python3 -m oris.initial_conditions "$zip_dir" "{media_targets_arg}"
             echo ">>> [INITIAL] Finished AddMedia + InitialConditions on $zip_dir"
             """
         ).rstrip()
-
         initial_script_name = f"oris_initial_{timestamp}.sbatch"
         initial_script_path = sbatch_dir / initial_script_name
         initial_script_text = build_sbatch_script(slurm_run_cfg, env_cfg, initial_body)
