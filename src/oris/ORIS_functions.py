@@ -964,17 +964,31 @@ def PathsOrisFull_HPC(zips, limit = None):
             os.makedirs(results_dir, exist_ok = True)
             with zipfile.ZipFile(zip_path, "r") as z:
                 nl = z.namelist()
-                has_samp = any(m.startswith("SampModels/") for m in nl)
-                if has_samp:
+                sample_file = f"src/SampledModels_{os.path.splitext(zfile)[0]}.txt"
+                
+                if sample_file in nl:
+                    sampled = {
+                        os.path.basename(x.strip())
+                        for x in z.read(sample_file).decode("utf-8").splitlines()
+                        if x.strip()
+                    }
+                
                     to_extract = [
                         m for m in nl
-                        if (m.startswith("PertModels/") or m.startswith("SampModels/"))
+                        if m.startswith("Models/")
                         and m.endswith(".bnet")
+                        and os.path.basename(m) in sampled
                     ]
+                
+                    print(
+                        f"[PATHS FULL] {zfile}: using sampled models: {len(to_extract)}",
+                        flush=True
+                    )
+                
                 else:
                     to_extract = [
                         m for m in nl
-                        if (m.startswith("PertModels/") or m.startswith("Models/"))
+                        if m.startswith("Models/")
                         and m.endswith(".bnet")
                     ]
                 for member in to_extract:
