@@ -31,13 +31,20 @@ PathsOris_HPC(zips)
 comm.Barrier()
 
 zfiles = sorted(f for f in os.listdir(zips) if f.endswith(".zip"))
+
 for i, zfile in enumerate(zfiles):
     if i % size == rank:
         zip_path = os.path.join(zips, zfile)
         groupname = zfile.replace(".zip", "")
+        print(f"[SYNERGY START rank {rank}] {zfile}", flush=True)
         data = Synergies(zip_path)
+        print(f"[SYNERGY DONE rank {rank}] {zfile} shape={data.shape}", flush=True)
         tsv = data.to_csv(sep="\t", index=True).encode("utf-8")
         with zipfile.ZipFile(zip_path, "a") as z:
             arcname = f"Results/SynergyExcess_{groupname}.tsv"
             z.writestr(arcname, tsv)
-        print(f"✅ Synergy excess data added to {arcname} in {zfile}")
+        print(f"✅ Synergy excess data added to {arcname} in {zfile}", flush=True)
+comm.Barrier()
+
+if rank == 0:
+    print("✅ compute_synergies fully finished", flush=True)
