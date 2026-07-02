@@ -11,7 +11,7 @@ from mpi4py import MPI
 import shutil
 import warnings
 import random
-import signal
+import multiprocessing as mp
 from multiprocessing import Process, Queue
 
 comm = MPI.COMM_WORLD
@@ -149,6 +149,174 @@ def InitialConditions(zips):
             shutil.rmtree(tempdir, ignore_errors = True)
             print(f"✅️ Initial conditions added to {os.path.splitext(zfile)[0]}.zip")
         comm.Barrier()
+
+##################################################################################
+
+def FilterLazyModels(zip_path, timeout=20):
+    """
+    Filter one zip's Models/ folder by load time (mirrors SampleModels).
+
+    Every .bnet model in Models/ is test-loaded with blv.Load() inside a
+    forked worker with a hard `timeout`. Models that exceed the timeout (or
+    fail to load) are 'lazy' and get moved to LazyModels/ inside the zip,
+    removed from Models/.
+
+    Uses an MPI MASTER/WORKER scheme (point-to-point send/recv + Abort at the
+    end), exactly like SampleModels, so it never deadlocks on collectives.
+    """
+    # === Paths ===
+    zips_dir = os.path.dirname(zip_path)
+    zfile    = os.path.basename(zip_path)
+
+    tempdir    = os.path.join(zips_dir, f"tempdir_{os.path.splitext(zfile)[0]}")
+    models_dir = os.path.join(tempdir, "Models")
+
+    # === Prepare tempdir and extract (master only) ===
+    if rank == 0:
+        if os.path.isdir(tempdir):
+            shutil.rmtree(tempdir, ignore_errors=True)
+        os.makedirs(tempdir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            model_files_in_zip = [
+                m for m in z.namelist()
+                if m.startswith("Models/") and m.endswith(".bnet")
+            ]
+            for f in model_files_in_zip:
+                z.extract(f, path=tempdir)
+    comm.Barrier()
+
+    # === Model list (shared filesystem, identical on every rank) ===
+    model_files = sorted(
+        os.path.join(models_dir, fn)
+        for fn in os.listdir(models_dir)
+        if fn.endswith(".bnet")
+    )
+    modelcount = len(model_files)
+
+    def _rewrite_zip(lazy_names):
+        n_lazy = len(lazy_names)
+        print(
+            f"\n[LAZY] {zfile}: {n_lazy}/{modelcount} models exceed the "
+            f"{timeout}s load threshold -> moving to LazyModels/",
+            flush=True,
+        )
+        tmp_zip = zip_path + ".tmp"
+        with zipfile.ZipFile(zip_path, "r") as zin, \
+             zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if (
+                    item.filename.startswith("Models/")
+                    and os.path.basename(item.filename) in lazy_names
+                ):
+                    new_name = "LazyModels/" + os.path.basename(item.filename)
+                    zout.writestr(new_name, zin.read(item.filename))
+                    print(f"  -> {item.filename}  ->  {new_name}", flush=True)
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+        os.replace(tmp_zip, zip_path)
+        shutil.rmtree(tempdir, ignore_errors=True)
+        print(f"✅️ LazyModels filtering done for {zfile}", flush=True)
+
+    # === Serial fallback if there are no workers (single rank) ===
+    if size < 2:
+        lazy_names = set()
+        for idx in range(modelcount):
+            if _load_is_lazy(model_files[idx], timeout):
+                lazy_names.add(os.path.basename(model_files[idx]))
+        _rewrite_zip(lazy_names)
+        return
+
+    # ======================================================================
+    # MASTER
+    # ======================================================================
+    def master_filter():
+        status = MPI.Status()
+        lazy_names = set()
+
+        print(
+            f"\n[MASTER] Lazy filter for {zfile} "
+            f"({modelcount} models, timeout = {timeout}s)",
+            flush=True,
+        )
+
+        next_ptr = 0
+        # Send one initial model index to each worker.
+        for r in range(1, size):
+            if next_ptr < modelcount:
+                comm.send(next_ptr, dest=r, tag=11)
+                next_ptr += 1
+            else:
+                comm.send(-1, dest=r, tag=11)
+
+        received = 0
+        while received < modelcount:
+            idx, is_lazy = comm.recv(source=MPI.ANY_SOURCE, tag=22, status=status)
+            src = status.Get_source()
+            received += 1
+
+            name = os.path.basename(model_files[idx])
+            if is_lazy:
+                lazy_names.add(name)
+                print(
+                    f"[MASTER] LAZY ({len(lazy_names)}) -> {name}",
+                    flush=True,
+                )
+
+            # Hand out the next model, or tell the worker to stop.
+            if next_ptr < modelcount:
+                comm.send(next_ptr, dest=src, tag=11)
+                next_ptr += 1
+            else:
+                comm.send(-1, dest=src, tag=11)
+
+        _rewrite_zip(lazy_names)
+        MPI.COMM_WORLD.Abort(0)
+
+    # ======================================================================
+    # WORKER
+    # ======================================================================
+    def worker_filter():
+        status = MPI.Status()
+        while True:
+            idx = comm.recv(source=0, tag=11, status=status)
+            if idx < 0:
+                break
+            is_lazy = _load_is_lazy(model_files[idx], timeout)
+            comm.send((idx, is_lazy), dest=0, tag=22)
+
+    if rank == 0:
+        master_filter()
+    else:
+        worker_filter()
+
+
+def _load_is_lazy(mpath, timeout):
+    """Return True if the model fails to load within `timeout` seconds."""
+    def _try_load(q):
+        try:
+            blv.Load(mpath)
+            q.put(True)
+        except Exception:
+            q.put(False)
+
+    q = Queue()
+    p = Process(target=_try_load, args=(q,))
+    p.start()
+    p.join(timeout=timeout)
+
+    if p.is_alive():
+        p.terminate()
+        p.join()
+        print(f"[LAZY] Timeout ({timeout}s) exceeded: {os.path.basename(mpath)}", flush=True)
+        return True
+
+    try:
+        ok = q.get_nowait()
+    except Exception:
+        ok = False
+    if not ok:
+        print(f"[LAZY] Load failed: {os.path.basename(mpath)}", flush=True)
+    return not ok
 
 ##################################################################################
 
@@ -386,7 +554,9 @@ def PertModels_HPC(zips):
             os.makedirs(tempdir, exist_ok = True)
             os.makedirs(pert_dir, exist_ok = True)
             with zipfile.ZipFile(zip_path, "r") as z:
-                z.extractall(tempdir)
+                for entry in z.infolist():
+                    if not entry.filename.startswith("LazyModels/"):
+                        z.extract(entry, path=tempdir)
         comm.Barrier()
         
         dp_path = os.path.join(tempdir, "src", "drugpanel")
