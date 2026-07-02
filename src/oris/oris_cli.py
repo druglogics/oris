@@ -80,6 +80,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Sampling size (0 = no sampling). If omitted, config default is used.",
     )
     parser.add_argument(
+        "--timeout-lazy",
+        type=int,
+        default=None,
+        help="Timeout in seconds for lazy model load check. If omitted, config value is used (default 20).",
+    )
+    parser.add_argument(
         "--timeout-sampling",
         type=int,
         default=None,
@@ -279,6 +285,10 @@ def main(argv: list[str] | None = None) -> None:
     if timeout_paths is None:
         timeout_paths = oris_cfg.get("timeout_paths", None)
 
+    timeout_lazy = args.timeout_lazy
+    if timeout_lazy is None:
+        timeout_lazy = oris_cfg.get("timeout_lazy_models", 20)
+
     media_targets = oris_cfg.get("media_targets", [])
     media_targets_arg = ",".join(media_targets)
 
@@ -293,6 +303,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Mode              : {args.mode}")
     print(f"Sampling          : {sampling}")
     print(f"Skip initial      : {args.skip_initial}")
+    print(f"Timeout lazy      : {timeout_lazy}")
     print(f"Timeout sampling  : {timeout_sampling}")
     print(f"Timeout paths     : {timeout_paths}")
     print()
@@ -368,10 +379,36 @@ def main(argv: list[str] | None = None) -> None:
     initial_job_id: str | None = None
     sampling_job_id: str | None = None
     pipeline_job_id: str | None = None
+    lazy_filter_job_id: str | None = None
 
     initial_script_name: str | None = None
     sampling_script_name: str | None = None
     pipeline_script_name: str | None = None
+    lazy_filter_script_name: str | None = None
+
+    # 6a-bis) Lazy model filter job (always runs first)
+    lazy_filter_body = textwrap.dedent(
+        f"""\
+        zip_dir="{zips_dir}"
+        for z in "$zip_dir"/*.zip; do
+            echo ">>> [LAZY] Starting lazy model filter for: $z (timeout={timeout_lazy}s)"
+            mpirun python3 -m oris.filter_lazy "$z" "{timeout_lazy}"
+            echo ">>> [LAZY] Finished lazy model filter for: $z"
+        done
+        """
+    ).rstrip()
+    lazy_filter_script_name = f"oris_lazy_filter_{timestamp}.sbatch"
+    lazy_filter_script_path = sbatch_dir / lazy_filter_script_name
+    lazy_filter_script_text = build_sbatch_script(slurm_run_cfg, env_cfg, lazy_filter_body)
+    lazy_filter_script_path.write_text(lazy_filter_script_text, encoding="utf-8")
+
+    print(f"[INFO] Lazy filter sbatch script written to: {lazy_filter_script_path}")
+
+    if auto_submit and not args.dry_run:
+        print("[INFO] Submitting lazy model filter job...")
+        lazy_filter_job_id = submit_sbatch(lazy_filter_script_path)
+
+    print()
 
     # 6b) Initial conditions job (MEDIA + iCOND), unless user skipped it
     if not args.skip_initial:
@@ -392,8 +429,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[INFO] Initial conditions sbatch script written to: {initial_script_path}")
 
         if auto_submit and not args.dry_run:
-            print("[INFO] Submitting initial conditions job...")
-            initial_job_id = submit_sbatch(initial_script_path)
+            dep_for_initial = lazy_filter_job_id
+            if dep_for_initial:
+                print(f"[INFO] Submitting initial conditions job with dependency afterok:{dep_for_initial} ...")
+            else:
+                print("[INFO] Submitting initial conditions job without dependency...")
+            initial_job_id = submit_sbatch(initial_script_path, dependency=dep_for_initial)
 
         print()
     else:
@@ -421,7 +462,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[INFO] Sampling sbatch script written to: {sampling_script_path}")
 
         if auto_submit and not args.dry_run:
-            dep_for_sampling = initial_job_id  # may be None
+            dep_for_sampling = initial_job_id or lazy_filter_job_id  # may be None
             if dep_for_sampling:
                 print(f"[INFO] Submitting sampling job with dependency afterok:{dep_for_sampling} ...")
             else:
@@ -477,8 +518,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"[INFO] Pipeline sbatch script written to: {pipeline_script_path}")
 
     if auto_submit and not args.dry_run:
-        # Dependency chain: pipeline waits for sampling if present, else initial if present.
-        dep_for_pipeline = sampling_job_id or initial_job_id
+        # Dependency chain: pipeline waits for sampling if present, else initial if present, else lazy.
+        dep_for_pipeline = sampling_job_id or initial_job_id or lazy_filter_job_id
         if dep_for_pipeline:
             print(f"[INFO] Submitting pipeline job with dependency afterok:{dep_for_pipeline} ...")
         else:
@@ -489,30 +530,33 @@ def main(argv: list[str] | None = None) -> None:
     print("====================================")
     print("  ORIS CLI - ORCHESTRATION SUMMARY")
     print("====================================")
-    print(f"Run directory       : {run_root}")
-    print(f"Initial job script  : {('none (skipped)' if args.skip_initial else sbatch_dir / initial_script_name)}")
-    print(f"Sampling job script : {('none (sampling == 0)' if not (sampling and sampling > 0) else sbatch_dir / sampling_script_name)}")
-    print(f"Pipeline job script : {sbatch_dir / pipeline_script_name}")
+    print(f"Run directory         : {run_root}")
+    print(f"Lazy filter script    : {sbatch_dir / lazy_filter_script_name}")
+    print(f"Initial job script    : {('none (skipped)' if args.skip_initial else sbatch_dir / initial_script_name)}")
+    print(f"Sampling job script   : {('none (sampling == 0)' if not (sampling and sampling > 0) else sbatch_dir / sampling_script_name)}")
+    print(f"Pipeline job script   : {sbatch_dir / pipeline_script_name}")
     if auto_submit and not args.dry_run:
         print()
         print("Submitted jobs:")
+        print(f"  lazy_filter : {lazy_filter_job_id}")
         if not args.skip_initial:
-            print(f"  initial   : {initial_job_id}")
+            print(f"  initial     : {initial_job_id}")
         if sampling and sampling > 0:
-            print(f"  sampling  : {sampling_job_id}")
-        print(f"  pipeline  : {pipeline_job_id}")
+            print(f"  sampling    : {sampling_job_id}")
+        print(f"  pipeline    : {pipeline_job_id}")
     else:
         print()
         print("auto_submit is disabled or dry-run was used.")
         print("You can submit the jobs manually with:")
+        print(f"  sbatch {sbatch_dir / lazy_filter_script_name}")
         if not args.skip_initial and initial_script_name is not None:
-            print(f"  sbatch {sbatch_dir / initial_script_name}")
+            print(f"  sbatch --dependency=afterok:<lazy_filter_job_id> {sbatch_dir / initial_script_name}")
         if sampling and sampling > 0 and sampling_script_name is not None:
             if not args.skip_initial:
                 print(f"  sbatch --dependency=afterok:<initial_job_id> {sbatch_dir / sampling_script_name}")
             else:
-                print(f"  sbatch {sbatch_dir / sampling_script_name}")
-        dep_hint = "<sampling_job_id>" if (sampling and sampling > 0) else "<initial_job_id>"
+                print(f"  sbatch --dependency=afterok:<lazy_filter_job_id> {sbatch_dir / sampling_script_name}")
+        dep_hint = "<sampling_job_id>" if (sampling and sampling > 0) else ("<initial_job_id>" if not args.skip_initial else "<lazy_filter_job_id>")
         print(f"  sbatch --dependency=afterok:{dep_hint} {sbatch_dir / pipeline_script_name}")
 
 
