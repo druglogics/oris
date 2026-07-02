@@ -25,7 +25,8 @@ module load Python/3.12.3-GCCcore-13.3.0
 
 # 🧠 ORIS configuration
 [oris]
-default_sampling = 10                       # When no --sampling 🧮
-media_targets = ["EGFR", "IGF1R", "MET"]    # Media nodes 🌐
-timeout_sampling = 300                      # Sampling threshold (seconds) ⏱️
+default_sampling     = 10                       # When no --sampling 🧮
+media_targets        = ["EGFR", "IGF1R", "MET"] # Media nodes 🌐
+timeout_lazy_models  = 20                       # Lazy model load threshold (seconds) ⏱️
+timeout_sampling     = 300                      # Sampling threshold (seconds) ⏱️
 timeout_paths = 600                         # CountPaths threshold (seconds) ⏱️
